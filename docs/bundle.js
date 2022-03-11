@@ -1,0 +1,1 @@
+(()=>{"use strict";console.log("ahoy"),document.body.innerText="matey",console.info("yay"+Math.random())})();
