@@ -22,7 +22,7 @@ module.exports = {
 	},
 	plugins: [
 		new HtmlWebpackPlugin({
-			title: 'Beep Boop',
+			template: path.resolve(__dirname, 'static', 'index.html'),
 			favicon: path.resolve(__dirname, 'static', 'favicon.ico'),
 		}),
 	],

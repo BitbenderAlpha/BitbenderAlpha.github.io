@@ -22,6 +22,7 @@
   },
   "homepage": "https://github.com/BitbenderAlpha/BitbenderAlpha.github.io#readme",
   "dependencies": {
+    "@bits.ts/all": "^0.22.0",
     "tsc": "^2.0.4"
   },
   "devDependencies": {
