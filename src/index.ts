@@ -85,7 +85,7 @@ function makePickState(root: number) {
 	});
 }
 
-let state: State = makeResultState(10, []);
+let state: State = makeTitleState();
 
 window.document.fonts.ready.then(draw);
 window.addEventListener('resize', draw);
