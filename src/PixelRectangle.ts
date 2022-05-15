@@ -29,6 +29,14 @@ export class PixelRectangle {
 		return new PixelRectangle(this.y, this.x, this.height, this.width);
 	}
 
+	public splitY(ratio: Ratio) {
+		return this.splitVertical(ratio);
+	}
+
+	public splitX(ratio: Ratio) {
+		return this.splitHorizontal(ratio);
+	}
+
 	public splitVertical(ratio: Ratio): [PixelRectangle, PixelRectangle] {
 		// Can't split a single pixel!
 		if (this.height.eq(PositiveInteger.One))

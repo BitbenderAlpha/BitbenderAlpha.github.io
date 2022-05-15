@@ -1,144 +1,285 @@
-// Please just... don't look at the code, k?
-
-import { NonNegativeInteger, PositiveInteger, Ratio } from "@bits.ts/all";
+import { NonNegativeInteger, PositiveInteger, Ratio, Result, SeedableRandomSource, UniformRandomIntegerDistribution } from "@bits.ts/all";
 import { PixelRectangle } from "./PixelRectangle";
+import { InputPointerEventComponent } from "./Input/PointerEvent/Component";
+import { InMemoryEcsEntityManager } from "./Lib/Architecture/Ecs/EntityManager/InMemory";
+import { makeInputPointerEventSystem } from "./Input/PointerEvent/System";
+import { makeTimeSystem } from "./Time/System";
+import { TimeComponent } from "./Time/Component";
+import { EcsEngine } from "./Lib/Architecture/Ecs/Engine";
+import { EcsSystem } from "./Lib/Architecture/Ecs/System";
+import { EcsEntityManagerInterface } from "./Lib/Architecture/Ecs/EntityManager/Interface";
+import { UiDimension } from "./Lib/Ui/Dimension";
 
-const canvas = document.getElementById('canvas') as HTMLCanvasElement;
-const canvasContext = canvas.getContext('2d') as CanvasRenderingContext2D;
+type Entity = Partial<{
+	time: TimeComponent,
+	inputPointerEvent: InputPointerEventComponent,
+	uiElement: UiElement,
+}>;
 
-type TitleScene = {
-	type: 'TITLE',
-};
+const { setTimeExternally, updateTimeEntity } = makeTimeSystem();
+const entityManager = new InMemoryEcsEntityManager<Entity>();
 
-type PickScene =
-	Readonly<{
-		type: 'PICK',
-		root: number,
-		sampleOrderPointer: number,
-		sampleOrder: number[],
-		answeredYellow: boolean[],
-		contextColor: '#000' | '#555' | '#aaa' | '#fff';
-	}>;
+const engine =
+	new EcsEngine({
+		entityManager,
+		systems: [
+			updateTimeEntity,
+			makeInputPointerEventSystem(),
+			makeCanvasUiDrawingSystem({ canvasDomId: 'canvas' }),
+		],
+});
 
-type ResultScene = {
-	type: 'RESULT',
-	root: number,
-	answeredYellow: boolean[],
-};
+function loop(ms: number, msp: number) {
+	setTimeExternally(ms);
+	engine.tick();
+	requestAnimationFrame(tick => loop(tick, ms));
+}
 
-type Scene =
-	TitleScene |
-	PickScene |
-	ResultScene;
+requestAnimationFrame(tp => requestAnimationFrame(t => loop(t, tp)));
 
-type State =
-	Readonly<{
-		scene: Scene,
-		pointer: null | {
-			id: number,
-			down: boolean,
-			start: {
-				x: number,
-				y: number,
-			},
-			end: {
-				x: number,
-				y: number,
-			},
+type UiComponent<T> =
+	(params: T, ...children:UiElement[]) =>
+		UiElement
+
+type UiElement<T = any>
+	= [ UiComponent<T>, T, ...UiElement[]]
+	| [ 'text', PrimitiveTextUiElementParams, ...string[] ]
+	| [ 'fill', PrimitiveFillUiElementParams, ...UiElement[] ]
+	| [ 'split', PrimitiveSplitUiElementParams, ...UiElement[] ]
+	| [ 'split-x', {}, ...UiElement[] ]
+	| [ 'split-y', {}, ...UiElement[] ]
+	| [ 'pad', PrimitivePaddedUiElementParams, ...UiElement[] ]
+	| [ 'fixed-aspect-ratio', PrimitiveFixedAspectRatioUiElementParams, ...UiElement[] ]
+	| [ 'touchable', PrimativeTouchableElementParams, ...UiElement[] ]
+	| number
+	| string
+	| boolean
+	| null
+
+interface UiEvent<T = null> {
+	readonly name: string;
+	readonly payload: T;
+}
+
+interface PrimativeTouchableElementParams {
+	onClickEvent: UiEvent,
+}
+
+interface PrimitiveFillUiElementParams {
+	readonly color?: string,
+}
+
+interface PrimitiveSplitUiElementParams {
+	readonly dimension?: UiDimension,
+	readonly ratio?: Ratio,
+}
+
+interface PrimitivePaddedUiElementParams {
+	readonly xPaddingRatio?: Ratio;
+	readonly yPaddingRatio?: Ratio;
+}
+
+interface PrimitiveFixedAspectRatioUiElementParams {
+	readonly ratio?: Ratio;
+	readonly longDimension?: UiDimension;
+}
+
+interface PrimitiveTextUiElementParams {
+	readonly text?: string,
+	readonly color?: string,
+}
+
+interface UiElementEntity {
+	uiElement?: UiElement,
+}
+
+function makeCanvasUiDrawingSystem({
+	canvasDomId,
+}: {
+	canvasDomId: string,
+}): EcsSystem<UiElementEntity> {
+	// todo -- result?
+	const canvas = document.getElementById(canvasDomId);
+	if (!(canvas instanceof HTMLCanvasElement)) throw new Error(`Bad canvas id ${canvasDomId}`);
+	const canvasContext = canvas.getContext('2d');
+	if (canvasContext === null) throw new Error('Failed to get 2d canvas context');
+
+	function drawUiElement(
+		element: UiElement,
+		region: PixelRectangle,
+		canvasContext: CanvasRenderingContext2D,
+	) {
+
+		if (element === null) return;
+
+		if (!Array.isArray(element)) {
+			drawUiElement(['text', {}, String(element)], region, canvasContext);
+			return;
 		}
-	}>;
 
-function makeDefaultState(scene: Scene): State {
-	return {
-		pointer: null,
-		scene,
-	};
-}
+		const [ component, params, ...children ] = element;
 
-function makeTitleState() {
-	return makeDefaultState({
-		type: 'TITLE',
-	});
-}
-
-function makeResultState(
-	root: number,
-	answeredYellow: boolean[],
-) {
-	return makeDefaultState({
-		type: 'RESULT',
-		root,
-		answeredYellow,
-	});
-}
-
-function makePickState(root: number) {
-	const sampleOrder = Array.from({length: root*root}).map( (_,i) => i);
-	sampleOrder.sort( (a,b) => Math.random() > 0.5 ? -1 : +1 );
-	return makeDefaultState({
-		type: 'PICK',
-		root,
-		sampleOrderPointer: 0,
-		sampleOrder,
-		answeredYellow: [],
-		contextColor: '#000',
-	});
-}
-
-let state: State = makeTitleState();
-
-window.document.fonts.ready.then(draw);
-window.addEventListener('resize', draw);
-window.addEventListener('pointerdown', e => {
-	if (state.pointer !== null) return;
-	const {pointerId, x, y} = e;
-	state = {
-		...state,
-		pointer: {
-			id: pointerId,
-			down: true,
-			start: {x, y},
-			end: {x, y},
+		if (component === 'fill') {
+			const {
+				color = 'black',
+			} = params;
+			canvasContext.fillStyle = color;
+			canvasContext.fillRect(
+				region.x.value,
+				region.y.value,
+				region.width.value,
+				region.height.value
+			);
+			if (children.length > 1) {
+				throw new Error('todo: support any number of children');
+			}
+			const child = children[0] || null;
+			drawUiElement(child, region, canvasContext);
+			return;
 		}
+
+		if (component === 'split') {
+			const {
+				dimension = 'y',
+				ratio = Ratio.Half,
+			} = params;
+			const [primaryRegion, secondaryRegion] =
+				dimension === 'x' 
+					? region.splitX(ratio)
+					: region.splitY(ratio);
+
+			if (children.length > 2) {
+				throw new Error('todo: support any number of children');
+			}
+
+			const primaryChild = children[0] || null;
+			const secondaryChild = children[1] || null;
+
+			drawUiElement(primaryChild, primaryRegion, canvasContext);
+			drawUiElement(secondaryChild, secondaryRegion, canvasContext);
+			return;
+		}
+
+		if (component === 'split-x') {
+			const N = children.length;
+			let remainingRegion = region;
+			let childRegion;
+			children.forEach( (childElement, i) => {
+				[childRegion, remainingRegion] = remainingRegion.splitX(Ratio.Clamp(1/(N-i)));
+				drawUiElement(childElement, childRegion, canvasContext);
+			});
+			return;
+		}
+
+		if (component === 'split-y') {
+			const N = children.length;
+			let remainingRegion = region;
+			let childRegion;
+			children.forEach( (childElement, i) => {
+				[childRegion, remainingRegion] = remainingRegion.splitY(Ratio.Clamp(1/(N-i)));
+				drawUiElement(childElement, childRegion, canvasContext);
+			});
+			return;
+		}
+
+		if (component === 'pad') {
+			// todo: move some of this complexity to the "Region" (pixelrectangle) class
+			const {
+				xPaddingRatio = Ratio.Min,
+				yPaddingRatio = Ratio.Min,
+			} = params;
+
+			let paddedRegion = region;
+			if (xPaddingRatio.gt(Ratio.Min)) {
+				if (xPaddingRatio.lt(Ratio.Max)) {
+					paddedRegion = paddedRegion.trimX(Ratio.Clamp(1 - xPaddingRatio.value));
+				}
+			}
+			if (yPaddingRatio.gt(Ratio.Min)) {
+				if (yPaddingRatio.lt(Ratio.Max)) {
+					paddedRegion = paddedRegion.trimY(Ratio.Clamp(1 - yPaddingRatio.value));
+				}
+			}
+
+			if (children.length > 1) {
+				throw new Error('todo: support any number of children');
+			}
+
+			const child = children[0] || null;
+			drawUiElement(child, paddedRegion, canvasContext);
+			return;
+		}
+
+		if (component === 'fixed-aspect-ratio') {
+			const {
+				longDimension = 'y',
+				ratio = Ratio.Max,
+			} = params;
+			let fixedRatioRegion: PixelRectangle;
+			if (longDimension === 'x') {
+				const heightCorrectionFactor = ratio.value * region.widthPerHeight;
+				if (heightCorrectionFactor > 1) {
+					// too wide and short -- trim along x dimension
+					fixedRatioRegion = region.trimX(Ratio.Clamp(1.0 / heightCorrectionFactor))
+				} else {
+					// too tall -- cut off bottom
+					fixedRatioRegion = region.splitY(Ratio.Clamp(heightCorrectionFactor))[0];
+				}
+			} else {
+				const widthCorrectionFactor = ratio.value * region.heightPerWidth;
+				if (widthCorrectionFactor < 1) {
+					// too wide -- trim along x dimension
+					fixedRatioRegion = region.trimX(Ratio.Clamp(widthCorrectionFactor));
+				} else {
+					// too tall -- cut off bottom
+					fixedRatioRegion = region.splitY(Ratio.Clamp(1.0 / widthCorrectionFactor))[0];
+				}
+			}
+			
+			if (children.length > 1) {
+				throw new Error('todo: support any number of children');
+			}
+
+			const child = children[0] || null;
+
+			drawUiElement(child, fixedRatioRegion, canvasContext);
+			return;
+		}
+
+		if (component === 'text') {
+			const {
+				color = 'white',
+			} = params;
+			canvasContext.fillStyle = color;
+			canvasContext.textAlign = 'center';
+			canvasContext.textBaseline = 'middle';
+			canvasContext.font = `${region.height.value}px 'Ubuntu Mono'`;
+			if (children.length > 1) {
+				throw new Error('todo: support any number of children');
+			}
+			const text: unknown = children[0] || '';
+			if (typeof text !== 'string') {
+				// This shouldn't happen
+				throw new Error('invalid text child');
+			}
+			canvasContext.fillText(
+				text,
+				region.x.value + region.width.value / 2,
+				region.y.value + region.height.value / 2,
+				region.width.value,
+			);
+			return;
+		}
+
+		if (component === 'touchable') {
+			
+			return;
+		}
+
+		drawUiElement(component(params, ...children), region, canvasContext);
 	}
-	draw();
-});
-window.addEventListener('pointercancel', e => {
-	if (state.pointer === null) return;
-	if (state.pointer.id !== e.pointerId) return;
-	state = { ...state, pointer: null};
-	draw();
-});
-window.addEventListener('pointerup', e => {
-	if (state.pointer === null) return;
-	if (state.pointer.id !== e.pointerId) return;
-	const {x, y} = e;
-	state = {
-		...state,
-		pointer: {
-			...state.pointer,
-			down: false,
-			end: {x, y},
-		}
-	}
-	draw();
-});
 
-window.addEventListener('pointermove', e => {
-	if (state.pointer === null) return;
-	if (state.pointer.id !== e.pointerId) return;
-	const {x, y} = e;
-	state = {
-		...state,
-		pointer: {
-			...state.pointer,
-			end: {x, y},
-		}
-	}
-	draw();
-});
-function draw() {
-	try {
+	return function drawUiToCanvas(em: EcsEntityManagerInterface<UiElementEntity>) {
 		// Scale Appropriately
 		const dpr = window.devicePixelRatio || 1.0;
 		canvas.style.width = `${window.innerWidth}px`;
@@ -147,7 +288,6 @@ function draw() {
 		canvas.height = Math.floor(dpr * window.innerHeight);
 		canvasContext.scale(dpr, dpr);
 
-		// Draw Background
 		const drawArea =
 			new PixelRectangle(
 				NonNegativeInteger.Zero,
@@ -156,343 +296,250 @@ function draw() {
 				PositiveInteger.From(window.innerHeight).orDie(),
 			);
 
-		fill(drawArea, 'black');
+		// Reset Canvas -- todo: optimize?
+		drawUiElement(['fill', { color: 'black' }], drawArea, canvasContext);
 
-		switch (state.scene.type) {
-			case 'TITLE': drawTitle(state, drawArea); break;
-			case 'PICK': drawPick(state, drawArea); break;
-			case 'RESULT': drawResult(state, drawArea); break;
+		// Draw each element
+		for (const { uiElement } of em.find(['uiElement'])) {
+			drawUiElement(uiElement, drawArea, canvasContext);
 		}
-
-		// Nothing consumed the "up", so clean it up
-		if (state.pointer && state.pointer.down === false) {
-			state = {
-				...state,
-				pointer: null,
-			}
-		}
-	} catch (e) {
-		if (e instanceof StateChangedMidDraw) {
-			draw();
-			return;
-		}
-		throw e;
 	}
 }
 
 
-function fill(area: PixelRectangle, color: string) {
-	canvasContext.fillStyle = color;
-	canvasContext.fillRect(
-		area.x.value,
-		area.y.value,
-		area.width.value,
-		area.height.value
-	);
-}
-
-// This is pretty straightforward and lazy
-function drawText(area: PixelRectangle, text: string, color: string = 'white') {
-	canvasContext.fillStyle = color;
-	canvasContext.textAlign = 'center';
-	canvasContext.textBaseline = 'middle';
-	canvasContext.font = `${area.height.value}px 'Ubuntu Mono'`;
-	canvasContext.fillText(
-		text,
-		area.x.value + area.width.value / 2,
-		area.y.value + area.height.value / 2,
-		area.width.value,
-	);
-}
-
-function drawHeader(area: PixelRectangle) {
-	clickable(area, () => makeTitleState());
-	fill(area, '#333');
-	const paddedArea = area.trimY(Ratio.From(0.8).orDie());
-	const titleSubtitleRatio = new Ratio(PositiveInteger.Two, PositiveInteger.One);
-	const [titleArea, subtitleArea] = paddedArea.splitVertical(titleSubtitleRatio);
-	drawText(titleArea, 'Green or Yellow?');
-	drawText(subtitleArea, 'A Colorblindness Game/Experiment');
-}
-
-function getYellownessLightnessRatios(index: number, root: number) {
-	const lightnessIndex = index % root;
-	const hueIndex = (index - lightnessIndex) / root;
-	return [
-		Ratio.Clamp((hueIndex + 0.5) / root),
-		Ratio.Clamp((lightnessIndex + 0.5) / root),
+// todo: make clickable
+const Header: UiComponent<void> = () =>
+	['fill', { color: '#333' },
+		['pad', { yPaddingRatio: Ratio.Clamp(0.2) },
+			['split', { ratio: Ratio.Clamp(2/3) },
+				['text', { color: 'white' },
+					'Green or Yellow?',
+				],
+				['text', { color: 'white' },
+					'A Colorblindness Game/Experiment',
+				],
+			],
+		],
 	];
-}
 
-function sample(index: number, root: number) {
-	const [yellowness, lightness] = getYellownessLightnessRatios(index, root);
-	return buildHsl(yellowness, lightness);
-}
-
-function drawPick(state: State, area: PixelRectangle) {
-	if (state.scene.type !== 'PICK') return;
+// function drawQuizScene(state: State, area: PixelRectangle) {
 	
-	const [headerArea, nonHeaderArea] =
-		area.splitVertical(Ratio.From(0.1).orDie());
-	drawHeader(headerArea);
-	const [bodyArea, footerArea] =
-		nonHeaderArea.splitVertical(Ratio.From(1-1/30).orDie());
-	fill(footerArea, 'black');
-	drawText(footerArea, 'Hacked Together by Bitbender');
+// 	if (!(state.scene instanceof QuizScene)) return;
 
-	// Guarantee Aspect Ratio of Main Section
-	const mainHeightWidthRatio = 1.5
-	const mainContentArea =
-		bodyArea.heightPerWidth < mainHeightWidthRatio
-			? bodyArea.trimX(Ratio.From(bodyArea.heightPerWidth/mainHeightWidthRatio).orDie())
-			: bodyArea.splitVertical(Ratio.From(mainHeightWidthRatio/bodyArea.heightPerWidth).orDie())[0]
+// 	drawUiElement(
+// 		[
+// 			'split', {
+// 				ratio: Ratio.Clamp(0.1),
+// 				primaryChild: [ Header ],
+// 				secondaryChild: [
+// 					'split', {
+// 						ratio: Ratio.Clamp(1 - 1/30),
+// 						secondaryChild: [
+// 							'fill', {
+// 								color: 'black',
+// 								child: [
+// 									'text', {
+// 										text: 'Hacked Together by Bitbender',
+// 										color: 'white',
+// 									}
+// 								],
+// 							},
+// 						],
+// 					}
+// 				],
+// 			}
+// 		],
+// 		area,
+// 	);
 
-	const [squareArea, controlsArea] =
-		mainContentArea
-			.splitVertical(Ratio.From(mainContentArea.widthPerHeight).orDie());
-
-	fill(squareArea, state.scene.contextColor);
-	const paddingRatio = Ratio.Clamp(0.9);
-	const colorSampleArea = squareArea.trimX(paddingRatio).trimY(paddingRatio);
-
-	const currentColorIndex = state.scene.sampleOrder[state.scene.sampleOrderPointer];
-	fill(colorSampleArea, sample(currentColorIndex, state.scene.root));
-
-
-	const [progressBarArea, buttonsArea] = controlsArea.splitVertical(Ratio.Clamp(0.1));
-
-
-	const progressBar = progressBarArea.trimY(Ratio.Half).splitHorizontal(Ratio.Clamp(state.scene.sampleOrderPointer / state.scene.sampleOrder.length))[0];
-	fill(progressBar, 'white');
-
-	const [selectionButtonsArea, nonSelectionButtonsArea] =
-		buttonsArea.trimX(paddingRatio).trimY(paddingRatio)
-			.splitVertical(Ratio.Clamp(0.5));
-
-	const [unpaddedGreenButtonArea, unpaddedYellowButtonArea] =
-		selectionButtonsArea.splitHorizontal(Ratio.Half);
-
-	const greenButtonArea = unpaddedGreenButtonArea.trimRight(paddingRatio);
-	const yellowButtonArea = unpaddedYellowButtonArea.trimLeft(paddingRatio);
-
-	function registerColorSelection(isYellow: boolean) {
-		return function onClick(state: State): State {
-			// This line exists for type inference
-			if (state.scene.type !== 'PICK') return state;
-
-			const answeredYellow = [...state.scene.answeredYellow];
-			const index = state.scene.sampleOrder[state.scene.sampleOrderPointer];
-			answeredYellow[index] = isYellow;
-
-			const sampleOrderPointer = state.scene.sampleOrderPointer + 1;
-			if (sampleOrderPointer >= state.scene.sampleOrder.length) {
-				return makeResultState(state.scene.root, answeredYellow);
-			}
-
-			return {
-				...state,
-				scene: {
-					...state.scene,
-					answeredYellow,
-					sampleOrderPointer,
-				}
-			}
-		}
-	}
-
-	drawButton(greenButtonArea, 'Green!', registerColorSelection(false));
-	drawButton(yellowButtonArea, 'Yellow!', registerColorSelection(true));
-
-	const contextArea = inset(nonSelectionButtonsArea, Ratio.Clamp(0.9));
-	const [contextTitleArea, contextButtonsArea] = contextArea.splitVertical(Ratio.Half);
-	drawText(contextTitleArea, 'Select Context Color:');
-	const [darkContexts, lightContexts] = contextButtonsArea.splitHorizontal(Ratio.Half);
-	const [blackContext, darkGrayContext] = darkContexts.splitHorizontal(Ratio.Half);
-	const [lightGrayContext, whiteContext] = lightContexts.splitHorizontal(Ratio.Half);
-
-	const setContext =
-		(color: PickScene['contextColor']) =>
-		(state: State) => ({
-			...state,
-			scene: {
-				...state.scene,
-				contextColor: color,
-			},
-		});
-
-	drawButton(blackContext, 'Black', setContext('#000'), state.scene.contextColor === '#000');
-	drawButton(darkGrayContext, 'Dark Gray', setContext('#555'), state.scene.contextColor === '#555');
-	drawButton(lightGrayContext, 'Light Gray', setContext('#aaa'), state.scene.contextColor === '#aaa');
-	drawButton(whiteContext, 'White', setContext('#fff'), state.scene.contextColor === '#fff');
-}
-
-function buildHsl(yellowGreenRatio: Ratio, lightnessRatio: Ratio) {
-	const hue = 135 - 90 * yellowGreenRatio.value;
-	const value = 15 + 70 * lightnessRatio.value
-	return `hsl(${hue},100%,${value}%)`
-}
-
-function drawTitle(state: State, area: PixelRectangle) {
-	if (state.scene.type !== 'TITLE') return;
+// 	const [bodyArea] =
+// 		area.splitVertical(Ratio.From(0.1).orDie())[1].splitVertical(Ratio.From(1-1/30).orDie());
 	
-	const [headerArea, nonHeaderArea] =
-		area.splitVertical(Ratio.From(0.1).orDie());
-	drawHeader(headerArea);
-	const [bodyArea, footerArea] =
-		nonHeaderArea.splitVertical(Ratio.From(1-1/30).orDie());
-	fill(footerArea, 'black');
-	drawText(footerArea, 'Hacked Together by Bitbender');
 
-	// Guarantee Aspect Ratio of Main Section
-	const mainHeightWidthRatio = 1.5
-	const mainContentArea =
-		bodyArea.heightPerWidth < mainHeightWidthRatio
-			? bodyArea.trimX(Ratio.From(bodyArea.heightPerWidth/mainHeightWidthRatio).orDie())
-			: bodyArea.splitVertical(Ratio.From(mainHeightWidthRatio/bodyArea.heightPerWidth).orDie())[0]
+// 	// Guarantee Aspect Ratio of Main Section
+// 	const mainHeightWidthRatio = 1.5
+// 	const mainContentArea =
+// 		bodyArea.heightPerWidth < mainHeightWidthRatio
+// 			? bodyArea.trimX(Ratio.From(bodyArea.heightPerWidth/mainHeightWidthRatio).orDie())
+// 			: bodyArea.splitVertical(Ratio.From(mainHeightWidthRatio/bodyArea.heightPerWidth).orDie())[0]
+
+// 	const [squareArea, controlsArea] =
+// 		mainContentArea
+// 			.splitVertical(Ratio.From(mainContentArea.widthPerHeight).orDie());
+
+// 	const grayByte = Math.floor(state.scene.contextLightness.value * 256).toString(16);
+// 	const contextColor = '#' + [0,0,0].map(() => grayByte).join('');
+// 	drawUiElement(['fill', {color: contextColor }], squareArea);
+// 	const paddingRatio = Ratio.Clamp(0.9);
+// 	const colorSampleArea = squareArea.trimX(paddingRatio).trimY(paddingRatio);
+
+// 	drawUiElement(['fill', {color: state.scene.quiz.currentColor }], colorSampleArea);
+// 	if ((new URLSearchParams(location.search)).get('debug') === 'true') {
+// 		drawText(colorSampleArea.trimY(Ratio.Clamp(.1)), state.scene.quiz.currentColor);
+// 	}
+
+// 	const [progressBarArea, buttonsArea] = controlsArea.splitVertical(Ratio.Clamp(0.1));
+
+// 	const progressBar = progressBarArea.trimY(Ratio.Half).splitHorizontal(state.scene.quiz.progress)[0];
+// 	drawUiElement(['fill', { color: 'white' }], progressBar);
+
+// 	const [ selectionButtonsArea ] =
+// 		buttonsArea.trimX(paddingRatio).trimY(paddingRatio)
+// 			.splitVertical(Ratio.Half);
+
+// 	const [unpaddedGreenButtonArea, unpaddedYellowButtonArea] =
+// 		selectionButtonsArea.splitHorizontal(Ratio.Half);
+
+// 	const greenButtonArea = unpaddedGreenButtonArea.trimRight(paddingRatio);
+// 	const yellowButtonArea = unpaddedYellowButtonArea.trimLeft(paddingRatio);
+
+// 	function registerColorSelection(answeredYellow: boolean) {
+// 		return function onClick(state: State): State {
+// 			// This line exists for type inference
+// 			if (!(state.scene instanceof QuizScene)) return state;
+// 			const answerOutput = state.scene.quiz.answer(answeredYellow);
+// 			return {
+// 				...state, 
+// 				scene:
+// 				(answerOutput instanceof QuizState)
+// 					? state.scene.butQuiz(answerOutput)
+// 					: ResultScene.Make({answers: answerOutput})
+// 			};
+// 		}
+// 	}
+
+// 	drawButton(greenButtonArea, 'Green!', registerColorSelection(false));
+// 	drawButton(yellowButtonArea, 'Yellow!', registerColorSelection(true));
+// }
 
 
-	const [titleArea, buttonArea] = mainContentArea.splitVertical(Ratio.Clamp(1/10));
-	const textArea = titleArea.splitVertical(Ratio.Half)[1];
+const Footer: UiComponent<void> = () =>
+	['fill', { color: 'black' },
+		['text', { color: 'white' },
+			'Hacked Together by Bitbender'
+		]
+	];
 
-	drawText(textArea, 'How many samples?');
+const Layout: UiComponent<void> =
+	(_, body) =>
+		['split', { ratio: Ratio.Clamp(0.1) },
+			[Header, {}],
+			['split', { ratio: Ratio.Clamp(1 - 1/30) },
+				['fixed-aspect-ratio', { longDimension: 'y', ratio: Ratio.Clamp(2/3) },
+					body,
+				],
+				[Footer, {}],
+			],
+		];
 
-	const sampleRoots = [4, 6, 8, 10];
-	let button: PixelRectangle;
-	let remainingArea = buttonArea;
-	sampleRoots.forEach( (root, i) => {
-		const d = sampleRoots.length - i;
-		if (d === 1) {
-			button = remainingArea;
-		} else {
-			[button, remainingArea] = remainingArea.splitVertical(Ratio.Clamp(1/d));
-		}
+const Title: UiComponent<void> = () =>
+	[Layout, {},
+		['split', { ratio: Ratio.Clamp(0.1) },
+			['split', {},
+				null,
+				['text', { color: 'white' },
+					'How many samples?',
+				]
+			],
+			['split-y', {},
+				...[4, 6, 8, 10].map<UiElement>( root => 
+					['pad', { xPaddingRatio: Ratio.Clamp(0.1), yPaddingRatio: Ratio.Clamp(0.3) },
+						[Button, {},
+							`${root*root} (${root}x${root})`,
+						],
+					]
+				),
+			],
+		],
+	];
 
-		const insetButtonArea = inset(button, Ratio.Clamp(0.9));
-		const buttonText = `${root*root} (${root}x${root})`;
-		drawButton(insetButtonArea, buttonText, () => makePickState(root));
+// function drawResult(state: State, area: PixelRectangle) {
+// 	if (!(state.scene instanceof ResultScene)) return;
 
-	});
-}
+// 	const [headerArea, nonHeaderArea] = area.splitVertical(Ratio.Clamp(0.1));
+// 	drawUiElement([ Header ], headerArea);
+// 	const [bodyArea, footerArea] =
+// 		nonHeaderArea.splitVertical(Ratio.From(1-1/30).orDie());
+// 	drawUiElement(['fill', { color: 'black' }], footerArea);
+// 	drawText(footerArea, 'Hacked Together by Bitbender');
 
-function drawResult(state: State, area: PixelRectangle) {
-	if (state.scene.type !== 'RESULT') return;
+// 	// Guarantee Aspect Ratio of Main Section
+// 	const mainHeightWidthRatio = 1.5
+// 	const mainContentArea =
+// 		bodyArea.heightPerWidth < mainHeightWidthRatio
+// 			? bodyArea.trimX(Ratio.From(bodyArea.heightPerWidth/mainHeightWidthRatio).orDie())
+// 			: bodyArea.splitVertical(Ratio.From(mainHeightWidthRatio/bodyArea.heightPerWidth).orDie())[0]
+
+// 	const [squareArea, controlsArea] =
+// 		mainContentArea
+// 			.splitVertical(Ratio.From(mainContentArea.widthPerHeight).orDie());
+
+// 	const paddingRatio = Ratio.Clamp(0.9);
+// 	const colorSampleArea = squareArea.trimX(paddingRatio).trimY(paddingRatio);
+
+// 	const blockWidth = Math.floor(colorSampleArea.width.value / state.scene.answers.rowCount.value);
+// 	const blockHeight = Math.floor(colorSampleArea.height.value / state.scene.answers.columnCount.value);
 	
-	const [headerArea, nonHeaderArea] =
-		area.splitVertical(Ratio.From(0.1).orDie());
-	drawHeader(headerArea);
-	const [bodyArea, footerArea] =
-		nonHeaderArea.splitVertical(Ratio.From(1-1/30).orDie());
-	fill(footerArea, 'black');
-	drawText(footerArea, 'Hacked Together by Bitbender');
+// 	for (const [i, j, [color, answeredYellow]] of state.scene.answers) {
+// 		const x = colorSampleArea.x.value + i.value * blockWidth;
+// 		const y = colorSampleArea.y.value + Math.floor(j.value * colorSampleArea.height.value / state.scene.answers.columnCount.value);
+// 		const area = new PixelRectangle(
+// 			NonNegativeInteger.From(x).orDie(),
+// 			NonNegativeInteger.From(y).orDie(),
+// 			PositiveInteger.From(blockWidth).orDie(),
+// 			PositiveInteger.From(blockHeight).orDie(),
+// 		);
+// 		drawUiElement([
+// 			'fill', { color }
+// 		], area);
+// 		drawText(area, answeredYellow ? 'Y' : 'G', 'black');
+// 	}
 
-	// Guarantee Aspect Ratio of Main Section
-	const mainHeightWidthRatio = 1.5
-	const mainContentArea =
-		bodyArea.heightPerWidth < mainHeightWidthRatio
-			? bodyArea.trimX(Ratio.From(bodyArea.heightPerWidth/mainHeightWidthRatio).orDie())
-			: bodyArea.splitVertical(Ratio.From(mainHeightWidthRatio/bodyArea.heightPerWidth).orDie())[0]
+// 	canvasContext.strokeStyle = 'white';
+// 	canvasContext.lineWidth = window.innerWidth / 100;
+// 	canvasContext.lineCap = 'butt';
+// 	canvasContext.beginPath()
+// 	canvasContext.moveTo(window.innerWidth / 2, squareArea.y.value);
+// 	canvasContext.lineTo(window.innerWidth / 2, squareArea.y.value + 1.25*squareArea.height.value);
+// 	canvasContext.stroke();
 
-	const [squareArea, controlsArea] =
-		mainContentArea
-			.splitVertical(Ratio.From(mainContentArea.widthPerHeight).orDie());
+// 	const [labelsArea, buttonArea] = controlsArea.splitVertical(Ratio.Clamp(1/6));
+// 	const [greenLabel, yellowLabel] = labelsArea.splitHorizontal(Ratio.Half);
+// 	drawText(greenLabel, '< Green', 'green');
+// 	drawText(yellowLabel, 'Yellow >', 'yellow');
 
-	const paddingRatio = Ratio.Clamp(0.9);
-	const colorSampleArea = squareArea.trimX(paddingRatio).trimY(paddingRatio);
+// 	drawButton(
+// 		buttonArea.trimX(Ratio.Clamp(0.8)).trimY(Ratio.Clamp(0.6)),
+// 		'<<< Restart!',
+// 		state => ({ ...state, scene: TitleScene.Make() })
+// 	);
+// }
 
-	const blockSize = Math.floor(colorSampleArea.width.value / state.scene.root);
-	for (let i = 0; i < state.scene.root; i++) {
-		const x = colorSampleArea.x.value + i * blockSize;
-		for (let j = 0; j < state.scene.root; j++) {
-			const y = colorSampleArea.y.value + j * blockSize;
-			const k = i*state.scene.root+j;
-			const area = new PixelRectangle(
-				NonNegativeInteger.From(x).orDie(),
-				NonNegativeInteger.From(y).orDie(),
-				PositiveInteger.From(blockSize).orDie(),
-				PositiveInteger.From(blockSize).orDie(),
-			);
-
-			fill(area, sample(k, state.scene.root));
-			const answeredYellow = state.scene.answeredYellow[k] as boolean|undefined;
-			const text =
-				answeredYellow === void 0
-					? '?'
-					: answeredYellow
-						? 'Y'
-						: 'G';
-
-			drawText(area, text, 'black');
-		}
-	}
-
-	canvasContext.strokeStyle = 'white';
-	canvasContext.lineWidth = window.innerWidth / 100;
-	canvasContext.lineCap = 'butt';
-	canvasContext.beginPath()
-	canvasContext.moveTo(window.innerWidth / 2, squareArea.y.value);
-	canvasContext.lineTo(window.innerWidth / 2, squareArea.y.value + 1.25*squareArea.height.value);
-	canvasContext.stroke();
-
-	const [labelsArea, buttonArea] = controlsArea.splitVertical(Ratio.Clamp(1/6));
-	const [greenLabel, yellowLabel] = labelsArea.splitHorizontal(Ratio.Half);
-	drawText(greenLabel, '< Green', 'green');
-	drawText(yellowLabel, 'Yellow >', 'yellow');
-
-	drawButton(inset(buttonArea, Ratio.Clamp(0.75)), '<<< Restart!', () => makeTitleState());
-
-
-}
-/// todo: move to rectangle?
-function contains(area: PixelRectangle, point: {x:number, y:number}) {
-	if (point.x < area.x.value) return false;
-	if (point.y < area.y.value) return false;
-	if (point.x > area.x.value + area.width.value) return false;
-	if (point.y > area.y.value + area.height.value) return false;
-	return true;
+interface UiButtonParameters {
+	readonly onClick?: () => void; // todo -- better
+	readonly active?: boolean;
 }
 
-class StateChangedMidDraw {}
-
-function clickable(
-	area: PixelRectangle,
-	onClick: (s: State) => State,
-) {
-	if (state.pointer) {
-		if (contains(area, state.pointer.start) && contains(area, state.pointer.end)) {
-			if (state.pointer.down === false) {
-				state = onClick({...state, pointer: null});
-				throw new StateChangedMidDraw();
-			}
-			return true;
-		}
-	}
-	return false;
-}
-
-function drawButton(
-	area: PixelRectangle,
-	text: string,
-	onclick: (s: State) => State,
-	active: boolean = false,
-) {
-	const isBeingPressed = clickable(area, onclick);
-	active = active || isBeingPressed;
+const Button: UiComponent<UiButtonParameters> = ({
+	onClick = () => {},
+	active = false,
+}, ...children) => {
+	// const isBeingPressed = clickable(area, onclick);
+	// active = active || isBeingPressed;
 	const [fillColor, textColor] = active ? ['white', 'black'] : ['black', 'white'];
-	const buttonInsetRatio = Ratio.Clamp(0.95);
-	fill(area, 'white');
-	const backgroundArea = inset(area, buttonInsetRatio);
-	fill(backgroundArea, fillColor);
-	const textArea = backgroundArea.trimY(Ratio.Half);
-	drawText(textArea, text, textColor);
-}
-
-function inset(area: PixelRectangle, widthRatio: Ratio) {
 	return (
-		area
-			.trimX(widthRatio)
-			.trimY(Ratio.Clamp(1 - (1-widthRatio.value) * area.widthPerHeight))
+		['fill', { color: 'white' },
+			['pad', { xPaddingRatio: Ratio.Clamp(0.05), yPaddingRatio: Ratio.Clamp(0.2) },
+				['fill', { color: fillColor},
+					['pad', { yPaddingRatio: Ratio.Half },
+						['text', { color: textColor },
+							...children.filter( child => typeof child === 'string') as string[],
+						],
+					],
+				],
+			],
+		]
 	);
-
-	// 1-(1-rx*)*w/h
 }
 
+const uiEntity = entityManager.create({uiElement: [Title, {}]})
